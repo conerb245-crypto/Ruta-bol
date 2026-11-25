@@ -4,3 +4,19 @@ La Paz,Micro,53,2021,Histórico agregado; no identifica líneas ni paradas
 La Paz,Minibús,326,2021,Histórico agregado; no identifica líneas ni paradas
 La Paz,Carry,98,2021,Histórico agregado; no identifica líneas ni paradas
 La Paz,Trufi,78,2021,Histórico agregado; no identifica líneas ni paradas
+municipio,modalidad,horario,tipo_tramo,tarifa_bs,fecha_fuente,estado
+La Paz,Minibús/Carry,Diurna,Tramo corto,3.0,2025-12-24,Publicación municipal reproducida en informe municipal 2026; confirmar vigencia
+La Paz,Minibús/Carry,Diurna,Tramo largo,3.5,2025-12-24,Publicación municipal reproducida en informe municipal 2026; confirmar vigencia
+La Paz,Minibús/Carry,Nocturna,Tramo corto,3.0,2025-12-24,Publicación municipal reproducida en informe municipal 2026; confirmar vigencia
+La Paz,Minibús/Carry,Nocturna,Tramo largo,3.8,2025-12-24,Publicación municipal reproducida en informe municipal 2026; confirmar vigencia
+La Paz,Micro/Bus,Diurna,Tarifa plana,2.5,2025-12-24,Publicación municipal reproducida en informe municipal 2026; confirmar vigencia
+La Paz,Micro/Bus,Nocturna,Tarifa plana,2.8,2025-12-24,Publicación municipal reproducida en informe municipal 2026; confirmar vigencia
+La Paz,Trufi,Diurna,Zonal corto,2.5,2025-12-24,Publicación municipal reproducida en informe municipal 2026; confirmar vigencia
+La Paz,Trufi,Diurna,Zonal,3.0,2025-12-24,Publicación municipal reproducida en informe municipal 2026; confirmar vigencia
+La Paz,Trufi,Diurna,Tramo largo,4.0,2025-12-24,Publicación municipal reproducida en informe municipal 2026; confirmar vigencia
+La Paz,Trufi,Diurna,Tramo extra largo,4.5,2025-12-24,Publicación municipal reproducida en informe municipal 2026; confirmar vigencia
+El Alto,Minibús,Todo horario,Tramo corto,2.0,2025-12-28,Tarifa transitoria RM 100/2025; confirmar si continúa vigente
+El Alto,Minibús,Todo horario,Tramo largo,2.5,2025-12-28,Tarifa transitoria RM 100/2025; confirmar si continúa vigente
+El Alto,Micro,Todo horario,Tarifa única,2.0,2025-12-28,Tarifa transitoria RM 100/2025; confirmar si continúa vigente
+El Alto,Trufi,Todo horario,Tarifa única,2.5,2025-12-28,Tarifa transitoria RM 100/2025; confirmar si continúa vigente
+route_id,municipio,modalidad,operador,nombre_ruta,orden_parada,parada,latitud,longitud,sentido,minutos_desde_anterior,fuente,fecha_verificacion,estado
