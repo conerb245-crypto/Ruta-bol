@@ -1,185 +1,453 @@
+import math
+import requests
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
-import heapq
-import math
 
-st.set_page_config(page_title="RUTA-BOL | Transporte y hospitales", page_icon="🚌", layout="wide")
+# ------------------------------------------------------------
+# RUTA-BOL | Aplicación de búsqueda de lugares y recorridos
+# Servicios externos:
+# - OpenStreetMap / Overpass: búsqueda de hospitales.
+# - Google Routes API: tiempo de conducción con tráfico.
+#
+# Configurar la clave en .streamlit/secrets.toml:
+# GOOGLE_MAPS_API_KEY = "TU_CLAVE"
+#
+# Nota funcional:
+# El tiempo de Google Routes representa tráfico vial para automóvil.
+# No representa la posición en vivo de minibuses. Para eso se requiere
+# GPS de vehículos o una fuente GTFS-Realtime del operador.
+# ------------------------------------------------------------
 
-# DEMO: nodos y conexiones ilustrativas. Sustituir por recorridos verificados y georreferenciados.
-NODES = {
-    "CEJA": {"name": "La Ceja (El Alto)", "lat": -16.5040, "lon": -68.1630, "kind": "origen"},
-    "BALL": {"name": "Cruce Ballivián (referencial)", "lat": -16.4980, "lon": -68.1580, "kind": "parada"},
-    "LIMA": {"name": "Av. Lima (referencial)", "lat": -16.4930, "lon": -68.1510, "kind": "parada"},
-    "CEM": {"name": "Cementerio General (referencial)", "lat": -16.5000, "lon": -68.1370, "kind": "parada"},
-    "SANF": {"name": "San Francisco (referencial)", "lat": -16.4970, "lon": -68.1350, "kind": "parada"},
-    "CLIN": {"name": "Hospital de Clínicas (destino)", "lat": -16.5100, "lon": -68.1280, "kind": "hospital"},
-    "VILLA": {"name": "Villa Dolores (alternativa referencial)", "lat": -16.5150, "lon": -68.1580, "kind": "parada"},
-    "SOPO": {"name": "Sopocachi (alternativa referencial)", "lat": -16.5110, "lon": -68.1260, "kind": "parada"},
-}
+st.set_page_config(
+    page_title="RUTA-BOL",
+    page_icon="🚌",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
-# Cada conexión es demostrativa; tiempo en minutos y línea ilustrativa.
-EDGES = [
-    ("CEJA", "BALL", 6, "Línea demostrativa A"),
-    ("BALL", "LIMA", 7, "Línea demostrativa A"),
-    ("LIMA", "CEM", 8, "Línea demostrativa B"),
-    ("CEM", "CLIN", 10, "Línea demostrativa B"),
-    ("CEJA", "VILLA", 9, "Línea demostrativa C"),
-    ("VILLA", "SANF", 11, "Línea demostrativa C"),
-    ("SANF", "CLIN", 12, "Línea demostrativa D"),
-    ("BALL", "SANF", 13, "Línea demostrativa E"),
-    ("LIMA", "SOPO", 9, "Línea demostrativa F"),
-    ("SOPO", "CLIN", 8, "Línea demostrativa F"),
-]
+CENTER = (-16.503, -68.145)
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+GOOGLE_ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
 
-def build_graph(blocked):
-    graph = {n: [] for n in NODES}
-    for a, b, minutes, line in EDGES:
-        edge_key = tuple(sorted((a, b)))
-        if edge_key in blocked:
-            continue
-        graph[a].append((b, minutes, line))
-        graph[b].append((a, minutes, line))
-    return graph
+st.markdown(""" <style> :root { --rb-blue:#087ea4; --rb-dark:#102638; --rb-cyan:#19b8c8; } .stApp { background: #f4f7fb; } .block-container { max-width: 1440px; padding-top: 1.1rem; padding-bottom: 2rem; } .rb-header { background: linear-gradient(115deg,#102638 0%,#123e58 58%,#087ea4 100%); padding: 1.35rem 1.5rem; border-radius: 22px; color: white; margin-bottom: 1rem; box-shadow: 0 12px 32px rgba(16,38,56,.15); } .rb-brand { font-size: 1.75rem; font-weight: 800; letter-spacing: .04em; margin:0; } .rb-subtitle { color:#d8edf5; margin:.25rem 0 0 0; font-size:.95rem; } .rb-panel { background:white; border:1px solid #e7edf3; border-radius:18px; padding:1rem 1.1rem; box-shadow:0 5px 20px rgba(16,38,56,.045); } .rb-muted { color:#647789; font-size:.88rem; } div[data-testid="stMetric"] { background:#f6f9fc; border:1px solid #e6edf3; padding:12px 14px; border-radius:14px; } .stButton>button[kind="primary"] { background:linear-gradient(100deg,#087ea4,#19a9b8); border:0; border-radius:12px; font-weight:700; min-height:2.8rem; } div[data-testid="stTextInput"] input { border-radius:11px; } footer { visibility:hidden; } </style> """, unsafe_allow_html=True)
 
-def dijkstra(start, goal, blocked=None):
-    blocked = blocked or set()
-    graph = build_graph(blocked)
-    queue = [(0, start, [start], [])]
-    best = {}
-    while queue:
-        cost, node, path, legs = heapq.heappop(queue)
-        if node in best and best[node] <= cost:
-            continue
-        best[node] = cost
-        if node == goal:
-            return cost, path, legs
-        for nxt, minutes, line in graph[node]:
-            if nxt not in path:
-                heapq.heappush(queue, (cost + minutes, nxt, path + [nxt], legs + [(node, nxt, minutes, line)]))
-    return None
 
-def alternatives(start, goal, blocked, limit=3):
-    first = dijkstra(start, goal, blocked)
-    if not first:
-        return []
-    candidates = []
+def get_google_key():
+    try:
+        return st.secrets.get("GOOGLE_MAPS_API_KEY", "")
+    except Exception:
+        return ""
+
+
+def geocode_place(query):
+    """Busca una dirección o lugar usando Nominatim."""
+    params = {
+        "q": f"{query}, La Paz, Bolivia",
+        "format": "jsonv2",
+        "limit": 1,
+        "countrycodes": "bo",
+    }
+    headers = {"User-Agent": "RUTA-BOL/2.0 (route-search app)"}
+    response = requests.get(NOMINATIM_URL, params=params, headers=headers, timeout=20)
+    response.raise_for_status()
+    results = response.json()
+    if not results:
+        return None
+    item = results[0]
+    return {
+        "name": item.get("display_name", query),
+        "lat": float(item["lat"]),
+        "lon": float(item["lon"]),
+    }
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_hospitals():
+    """Obtiene hospitales y clínicas etiquetados en OpenStreetMap alrededor de La Paz."""
+    query = f""" [out:json][timeout:35]; ( node["amenity"~"^(hospital|clinic)$"](around:18000,{CENTER[0]},{CENTER[1]}); way["amenity"~"^(hospital|clinic)$"](around:18000,{CENTER[0]},{CENTER[1]}); relation["amenity"~"^(hospital|clinic)$"](around:18000,{CENTER[0]},{CENTER[1]}); ); out center tags; """
+    response = requests.post(OVERPASS_URL, data=query.encode("utf-8"), timeout=45)
+    response.raise_for_status()
+    elements = response.json().get("elements", [])
+    places = []
     seen = set()
-    for a, b, *_ in first[2]:
-        result = dijkstra(start, goal, blocked | {tuple(sorted((a, b)))})
-        if result and tuple(result[1]) not in seen:
-            seen.add(tuple(result[1]))
-            candidates.append(result)
-    candidates.sort(key=lambda x: x[0])
-    return [first] + candidates[:limit-1]
-
-def make_map(routes, blocked, selected_idx=0):
-    m = folium.Map(location=[-16.503, -68.145], zoom_start=13, control_scale=True, tiles="OpenStreetMap")
-    for key, node in NODES.items():
-        if node["kind"] == "hospital":
-            color, icon = "red", "plus-sign"
-        elif node["kind"] == "origen":
-            color, icon = "green", "play"
-        else:
-            color, icon = "blue", "info-sign"
-        folium.Marker(
-            [node["lat"], node["lon"]],
-            popup=node["name"],
-            tooltip=node["name"],
-            icon=folium.Icon(color=color, icon=icon)
-        ).add_to(m)
-
-    palette = ["#1769ff", "#e58b00", "#7b4bd1"]
-    for idx, route in enumerate(routes):
-        if not route:
+    for element in elements:
+        tags = element.get("tags", {})
+        name = tags.get("name") or tags.get("name:es")
+        if not name:
             continue
-        coords = [[NODES[n]["lat"], NODES[n]["lon"]] for n in route[1]]
-        folium.PolyLine(
-            coords, color=palette[idx % len(palette)],
-            weight=7 if idx == selected_idx else 4,
-            opacity=0.95 if idx == selected_idx else 0.55,
-            tooltip=f"Alternativa {idx+1}"
+        lat = element.get("lat", element.get("center", {}).get("lat"))
+        lon = element.get("lon", element.get("center", {}).get("lon"))
+        if lat is None or lon is None:
+            continue
+        key = (name.strip().lower(), round(float(lat), 5), round(float(lon), 5))
+        if key in seen:
+            continue
+        seen.add(key)
+        places.append({
+            "name": name.strip(),
+            "lat": float(lat),
+            "lon": float(lon),
+            "kind": tags.get("amenity", "health"),
+            "address": ", ".join(
+                x for x in [
+                    tags.get("addr:street"),
+                    tags.get("addr:housenumber"),
+                    tags.get("addr:suburb"),
+                ] if x
+            ),
+        })
+    return sorted(places, key=lambda x: x["name"].lower())
+
+
+def decode_polyline(encoded):
+    """Decodifica una polyline codificada de Google."""
+    points = []
+    index = 0
+    lat = 0
+    lng = 0
+    while index < len(encoded):
+        result = 1
+        shift = 0
+        while True:
+            b = ord(encoded[index]) - 63
+            index += 1
+            result += (b & 0x1f) << shift
+            shift += 5
+            if b < 0x20:
+                break
+        dlat = ~(result >> 1) if result & 1 else (result >> 1)
+        lat += dlat
+
+        result = 1
+        shift = 0
+        while True:
+            b = ord(encoded[index]) - 63
+            index += 1
+            result += (b & 0x1f) << shift
+            shift += 5
+            if b < 0x20:
+                break
+        dlng = ~(result >> 1) if result & 1 else (result >> 1)
+        lng += dlng
+        points.append((lat / 1e5, lng / 1e5))
+    return points
+
+
+def get_traffic_route(origin, destination, api_key):
+    """Consulta Google Routes con tráfico vial actual para conducción."""
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": (
+            "routes.duration,routes.staticDuration,routes.distanceMeters,"
+            "routes.polyline.encodedPolyline,routes.description"
+        ),
+    }
+    payload = {
+        "origin": {
+            "location": {
+                "latLng": {"latitude": origin["lat"], "longitude": origin["lon"]}
+            }
+        },
+        "destination": {
+            "location": {
+                "latLng": {"latitude": destination["lat"], "longitude": destination["lon"]}
+            }
+        },
+        "travelMode": "DRIVE",
+        "routingPreference": "TRAFFIC_AWARE_OPTIMAL",
+        "computeAlternativeRoutes": True,
+        "languageCode": "es",
+        "units": "METRIC",
+    }
+    response = requests.post(
+        GOOGLE_ROUTES_URL, headers=headers, json=payload, timeout=35
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Google Routes respondió {response.status_code}: {response.text[:500]}"
+        )
+    routes = response.json().get("routes", [])
+    parsed = []
+    for route in routes:
+        duration = route.get("duration", "0s")
+        static_duration = route.get("staticDuration", "0s")
+        seconds = int(duration.rstrip("s"))
+        static_seconds = int(static_duration.rstrip("s"))
+        polyline = route.get("polyline", {}).get("encodedPolyline", "")
+        parsed.append({
+            "seconds": seconds,
+            "static_seconds": static_seconds,
+            "distance_m": int(route.get("distanceMeters", 0)),
+            "points": decode_polyline(polyline) if polyline else [],
+            "description": route.get("description", "Recorrido"),
+        })
+    return parsed
+
+
+def format_duration(seconds):
+    minutes = max(1, round(seconds / 60))
+    hours, mins = divmod(minutes, 60)
+    return f"{hours} h {mins} min" if hours else f"{mins} min"
+
+
+def format_distance(meters):
+    if meters >= 1000:
+        return f"{meters / 1000:.1f} km".replace(".", ",")
+    return f"{meters} m"
+
+
+def build_map(origin=None, destination=None, hospitals=None, routes=None):
+    m = folium.Map(
+        location=CENTER,
+        zoom_start=12,
+        tiles="CartoDB positron",
+        control_scale=True,
+    )
+    if hospitals:
+        for hospital in hospitals:
+            folium.Marker(
+                [hospital["lat"], hospital["lon"]],
+                tooltip=hospital["name"],
+                popup=folium.Popup(
+                    f"<b>{hospital['name']}</b><br>{hospital.get('address') or 'La Paz / El Alto'}",
+                    max_width=280,
+                ),
+                icon=folium.Icon(color="red", icon="plus-sign"),
+            ).add_to(m)
+
+    if origin:
+        folium.Marker(
+            [origin["lat"], origin["lon"]],
+            tooltip="Punto de partida",
+            popup=origin["name"],
+            icon=folium.Icon(color="green", icon="play"),
+        ).add_to(m)
+    if destination:
+        folium.Marker(
+            [destination["lat"], destination["lon"]],
+            tooltip="Destino",
+            popup=destination["name"],
+            icon=folium.Icon(color="blue", icon="flag"),
         ).add_to(m)
 
-    for a, b, *_ in EDGES:
-        if tuple(sorted((a, b))) in blocked:
-            p1, p2 = NODES[a], NODES[b]
-            folium.PolyLine(
-                [[p1["lat"], p1["lon"]], [p2["lat"], p2["lon"]]],
-                color="red", weight=5, dash_array="8, 8",
-                tooltip="Tramo marcado como bloqueado (dato ingresado)"
-            ).add_to(m)
+    if routes:
+        colors = ["#087ea4", "#e58b00", "#7754c8"]
+        for index, route in enumerate(routes):
+            if route["points"]:
+                folium.PolyLine(
+                    route["points"],
+                    color=colors[index % len(colors)],
+                    weight=7 if index == 0 else 5,
+                    opacity=0.95 if index == 0 else 0.65,
+                    tooltip=f"Alternativa {index + 1}",
+                ).add_to(m)
+        all_points = [p for route in routes for p in route["points"]]
+        if all_points:
+            m.fit_bounds(all_points)
+    elif origin and destination:
+        m.fit_bounds([
+            [origin["lat"], origin["lon"]],
+            [destination["lat"], destination["lon"]],
+        ])
     return m
 
-st.markdown("""
-<style>
-.block-container {padding-top: 1.2rem; padding-bottom: 1rem;}
-h1 {letter-spacing: -1px;}
-</style>
-""", unsafe_allow_html=True)
 
-st.title("🚌 RUTA-BOL")
-st.caption("Buscador demostrativo de transporte público hacia hospitales · La Paz y El Alto")
-st.warning("PROTOTIPO DEMOSTRATIVO: los puntos, líneas, tiempos y conexiones del ejemplo no son rutas verificadas en tiempo real.")
+# Encabezado de marca: no expone detalles internos ni estados de desarrollo.
+st.markdown(""" <div class="rb-header"> <p class="rb-brand">🚌 RUTA-BOL</p> <p class="rb-subtitle">Muévete mejor por La Paz y El Alto</p> </div> """, unsafe_allow_html=True)
 
-with st.sidebar:
-    st.header("Buscar recorrido")
-    start = st.selectbox("Punto de partida", list(NODES), format_func=lambda x: NODES[x]["name"], index=0)
-    goal = st.selectbox("Hospital de destino", ["CLIN"], format_func=lambda x: NODES[x]["name"])
-    st.divider()
-    st.subheader("Incidencias viales")
-    st.caption("Activa los tramos que quieras simular como bloqueados. No son reportes reales.")
-    incident_options = {
-        "La Ceja ↔ Cruce Ballivián": ("CEJA", "BALL"),
-        "Cruce Ballivián ↔ Av. Lima": ("BALL", "LIMA"),
-        "Av. Lima ↔ Cementerio": ("LIMA", "CEM"),
-        "Cementerio ↔ Hospital": ("CEM", "CLIN"),
-        "Villa Dolores ↔ San Francisco": ("VILLA", "SANF"),
-    }
-    chosen = []
-    for label, edge in incident_options.items():
-        if st.checkbox(label, key="block_" + label):
-            chosen.append(tuple(sorted(edge)))
-    st.caption("En una versión pública, estas incidencias deberán proceder de reportes verificados y fechados.")
-    calculate = st.button("🔎 CALCULAR RUTAS", type="primary", use_container_width=True)
+search_col, map_col = st.columns([0.88, 1.55], gap="large")
 
-if "routes" not in st.session_state:
-    st.session_state.routes = alternatives(start, goal, set(chosen))
-if calculate or st.session_state.get("last_query") != (start, goal, tuple(sorted(chosen))):
-    st.session_state.routes = alternatives(start, goal, set(chosen))
-    st.session_state.last_query = (start, goal, tuple(sorted(chosen)))
+with search_col:
+    st.markdown('<div class="rb-panel">', unsafe_allow_html=True)
+    st.subheader("¿A dónde quieres ir?")
+    origin_text = st.text_input(
+        "Punto de partida",
+        placeholder="Ej. La Ceja de El Alto",
+        key="origin_text",
+    )
+    destination_mode = st.radio(
+        "Destino",
+        ["Buscar lugar", "Hospital"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
 
-routes = st.session_state.routes
-left, right = st.columns([1.65, 1], gap="large")
-with left:
-    st.subheader("Mapa de recorridos")
-    if routes:
-        fmap = make_map(routes, set(chosen))
-        st_folium(fmap, height=570, use_container_width=True, returned_objects=[])
-        st.caption("Azul: ruta principal · Naranja y violeta: alternativas · Rojo discontinuo: tramo marcado como bloqueado")
+    hospitals = []
+    selected_hospital = None
+    if destination_mode == "Hospital":
+        hospital_query = st.text_input(
+            "Buscar hospital o clínica",
+            placeholder="Ej. Hospital de Clínicas",
+        )
+        try:
+            with st.spinner("Buscando centros de salud..."):
+                hospitals = load_hospitals()
+            filtered = [
+                h for h in hospitals
+                if not hospital_query.strip()
+                or hospital_query.lower() in h["name"].lower()
+            ]
+            if filtered:
+                selected_name = st.selectbox(
+                    "Centros de salud encontrados",
+                    [h["name"] for h in filtered],
+                )
+                selected_hospital = next(
+                    h for h in filtered if h["name"] == selected_name
+                )
+            else:
+                st.info("No se encontraron coincidencias. Prueba con otro nombre.")
+        except Exception:
+            st.warning("No se pudo consultar el directorio de centros de salud. Intenta nuevamente.")
     else:
-        st.error("No se encontró un recorrido con las incidencias seleccionadas.")
-with right:
-    st.subheader("Opciones encontradas")
-    if routes:
-        for idx, (minutes, path, legs) in enumerate(routes):
-            title = "Ruta recomendada" if idx == 0 else f"Ruta alternativa {idx}"
-            with st.container(border=True):
-                st.markdown(f"**{title}**")
-                st.metric("Tiempo estimado demostrativo", f"{minutes} min")
-                st.write(" → ".join(NODES[n]["name"] for n in path))
-                lines = list(dict.fromkeys(leg[3] for leg in legs))
-                st.caption("Transporte: " + ", ".join(lines))
-                if idx == 0:
-                    st.success("Menor tiempo estimado según los datos de ejemplo.")
-    else:
-        st.info("Prueba desactivando algún tramo bloqueado.")
+        destination_text = st.text_input(
+            "Destino",
+            placeholder="Ej. Plaza Murillo",
+            key="destination_text",
+        )
 
-st.divider()
-st.subheader("Cómo se gestionan los bloqueos")
-st.write(
-    "El algoritmo vuelve a calcular el camino excluyendo los tramos marcados. "
-    "Para detectar bloqueos reales automáticamente se necesita integrar una fuente de incidencias "
-    "con fecha, ubicación, estado y verificación; esta versión solo permite simular o registrar incidencias."
-)
-st.caption("RUTA-BOL · Proyecto académico · Datos de demostración, no usar para navegación real.")
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    search_clicked = st.button(
+        "Buscar recorrido",
+        type="primary",
+        use_container_width=True,
+    )
+    st.markdown(
+        '<p class="rb-muted">Los resultados dependen de la cobertura y actualización de los servicios cartográficos.</p>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+    st.markdown('<div class="rb-panel">', unsafe_allow_html=True)
+    st.subheader("Centros de salud cercanos")
+    if not hospitals:
+        try:
+            hospitals = load_hospitals()
+        except Exception:
+            hospitals = []
+    if hospitals:
+        for item in hospitals[:6]:
+            st.markdown(f"**{item['name']}**")
+            if item.get("address"):
+                st.caption(item["address"])
+    else:
+        st.caption("El directorio se cargará cuando el servicio cartográfico esté disponible.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+    st.markdown('<div class="rb-panel">', unsafe_allow_html=True)
+    st.subheader("Tu perfil")
+    st.caption("Consulta tus recorridos desde una experiencia sencilla y clara.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+with map_col:
+    st.markdown('<div class="rb-panel">', unsafe_allow_html=True)
+    st.subheader("Mapa de La Paz y El Alto")
+    route_results = st.session_state.get("route_results", [])
+    map_origin = st.session_state.get("map_origin")
+    map_destination = st.session_state.get("map_destination")
+    try:
+        current_hospitals = hospitals if hospitals else load_hospitals()
+    except Exception:
+        current_hospitals = []
+    fmap = build_map(
+        map_origin,
+        map_destination,
+        current_hospitals,
+        route_results,
+    )
+    st_folium(
+        fmap,
+        height=590,
+        use_container_width=True,
+        returned_objects=[],
+        key="ruta_bol_map",
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# La consulta se ejecuta después de dibujar los controles para mantener la interfaz estable.
+if search_clicked:
+    st.session_state.route_results = []
+    st.session_state.map_origin = None
+    st.session_state.map_destination = None
+
+    destination_value = (
+        selected_hospital["name"]
+        if destination_mode == "Hospital" and selected_hospital
+        else st.session_state.get("destination_text", "")
+    )
+
+    if not origin_text.strip():
+        st.error("Escribe un punto de partida.")
+    elif not destination_value:
+        st.error("Selecciona o escribe un destino.")
+    else:
+        try:
+            with st.spinner("Localizando los puntos del recorrido..."):
+                origin_data = geocode_place(origin_text)
+                destination_data = (
+                    {
+                        "name": selected_hospital["name"],
+                        "lat": selected_hospital["lat"],
+                        "lon": selected_hospital["lon"],
+                    }
+                    if destination_mode == "Hospital" and selected_hospital
+                    else geocode_place(destination_value)
+                )
+
+            if not origin_data:
+                st.error("No se pudo localizar el punto de partida. Prueba con un nombre más específico.")
+            elif not destination_data:
+                st.error("No se pudo localizar el destino. Prueba con otro nombre.")
+            else:
+                st.session_state.map_origin = origin_data
+                st.session_state.map_destination = destination_data
+                api_key = get_google_key()
+
+                if not api_key:
+                    st.warning(
+                        "La búsqueda de lugares está disponible, pero el cálculo de tráfico vial "
+                        "requiere configurar una clave de Google Routes API."
+                    )
+                else:
+                    with st.spinner("Calculando el recorrido con información de tráfico..."):
+                        results = get_traffic_route(
+                            origin_data, destination_data, api_key
+                        )
+                    if results:
+                        st.session_state.route_results = results
+                        st.success("Recorrido calculado.")
+                    else:
+                        st.info("No se encontraron recorridos para estos puntos.")
+        except requests.RequestException:
+            st.error("No fue posible conectar con el servicio cartográfico. Comprueba tu conexión e inténtalo nuevamente.")
+        except RuntimeError as exc:
+            st.error(f"No se pudo calcular el recorrido: {exc}")
+        except Exception:
+            st.error("Ocurrió un problema al procesar la búsqueda. Inténtalo nuevamente.")
+    st.rerun()
+
+# Resultados debajo del mapa, presentados sin exponer detalles técnicos.
+results = st.session_state.get("route_results", [])
+if results:
+    st.markdown("### Opciones de recorrido")
+    result_cols = st.columns(min(len(results), 3))
+    for index, route in enumerate(results[:3]):
+        with result_cols[index]:
+            st.markdown('<div class="rb-panel">', unsafe_allow_html=True)
+            st.markdown("**Recomendado**" if index == 0 else f"**Alternativa {index}**")
+            st.metric("Tiempo con tráfico", format_duration(route["seconds"]))
+            st.metric("Distancia", format_distance(route["distance_m"]))
+            if route["static_seconds"] > 0:
+                difference = route["seconds"] - route["static_seconds"]
+                if difference > 60:
+                    st.caption(f"El tráfico añade aproximadamente {format_duration(difference)}.")
+                else:
+                    st.caption("Tráfico fluido según la estimación disponible.")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+st.markdown(""" <hr> <div style="text-align:center;color:#718395;font-size:.82rem;"> RUTA-BOL · Información cartográfica sujeta a disponibilidad y actualización de sus proveedores. </div> """, unsafe_allow_html=True)
